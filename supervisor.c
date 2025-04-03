@@ -73,10 +73,6 @@ static inline int set_fd_nonblock(const int fd)
 
 static inline int set_fd_nosigpipe(const int fd)
 {
-    if (unlikely(set_fd_nonblock(fd))) {
-        return -1;
-    }
-
     if (unlikely(fcntl(fd, F_SETNOSIGPIPE, 1))) {
         log_errno("Cannot set nosigpipe descriptor flag");
         return -1;
@@ -103,7 +99,9 @@ static inline int spawn_sandbox(const char *const appname)
     supervisor.sandbox_ctlpipe_rfd = ctlpipe[0];
     const int sandbox_ctlpipe_wfd = ctlpipe[1];
 
-    if (unlikely(set_fd_nonblock(supervisor.sandbox_ctlpipe_rfd) || set_fd_nosigpipe(sandbox_ctlpipe_wfd))) {
+    if (unlikely(set_fd_nonblock(supervisor.sandbox_ctlpipe_rfd) ||
+        set_fd_nonblock(sandbox_ctlpipe_wfd) || set_fd_nosigpipe(sandbox_ctlpipe_wfd))) {
+
         goto fail_close_ctlpipe;
     }
 
@@ -571,7 +569,7 @@ static inline void accept_control_connection(void)
     } else {
         log_info("Accepted control connection");
 
-        if (unlikely(set_fd_nosigpipe(conn_fd))) {
+        if (unlikely(set_fd_nonblock(conn_fd) || set_fd_nosigpipe(conn_fd))) {
             close(conn_fd);
             return;
         }
@@ -876,5 +874,5 @@ out_cleanup:
     }
 
 out_exit:
-	return exit_status;
+    return exit_status;
 }

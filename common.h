@@ -4,6 +4,11 @@
 #define unlikely(x) __builtin_expect(!!(x), 0)
 #define countof(arr) (sizeof(arr) / sizeof(*(arr)))
 
+#define powerof2(x) ({ \
+    const typeof(x) x_once = (x); \
+    x_once && !(x_once & (x_once - 1)); \
+})
+
 #include <stdio.h> /* printf */
 #include <time.h> /* time() */
 #include <errno.h> /* errno */

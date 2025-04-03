@@ -4,9 +4,9 @@
 #include <stdint.h>
 
 #define cart_app(id, major, minor) \
-	const char *const cart_app_id = (id); \
-	const int cart_app_major = (major); \
-	const int cart_app_minor = (minor) \
+    const char *const cart_app_id = (id); \
+    const int cart_app_major = (major); \
+    const int cart_app_minor = (minor) \
 
 #define cart_load extern bool cart_load(void)
 #define cart_cb(name) static void (name)(void)
