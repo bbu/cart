@@ -28,15 +28,15 @@
 #define SLOTS_ALL_ZERO ((uint64_t) 0)
 #define SLOTS_FIRST ((uint64_t) 1)
 
-#define first_free_slot(s) ((size_t) __builtin_ctzll(s))
-#define count_free_slots(s) ((size_t) __builtin_popcountll(s))
+#define first_free_slot(slots) ((size_t) __builtin_ctzll(slots))
+#define count_free_slots(slots) ((size_t) __builtin_popcountll(slots))
 
 #define one_used_slot(slots, empty_slotmask) ({ \
     const typeof(slots) masked_slots = ~(slots) & (empty_slotmask); \
     (masked_slots & (masked_slots - 1)) == SLOTS_ALL_ZERO; \
 })
 
-size_t slab_pagesize;
+size_t slab_pagesize = 4096;
 
 #ifndef NDEBUG
 static int slab_is_valid(const struct slab_chain *const sch)
@@ -440,7 +440,8 @@ void slab_destroy(const struct slab_chain *const sch)
     }
 }
 
-static void slab_dump(FILE *const out, const struct slab_chain *const sch)
+#ifndef NDEBUG
+void slab_dump(FILE *const out, const struct slab_chain *const sch)
 {
     assert(out != NULL);
     assert(sch != NULL);
@@ -477,7 +478,7 @@ static void slab_dump(FILE *const out, const struct slab_chain *const sch)
     }
 }
 
-static void slab_stats(FILE *const out, const struct slab_chain *const sch)
+void slab_stats(FILE *const out, const struct slab_chain *const sch)
 {
     assert(out != NULL);
     assert(sch != NULL);
@@ -518,7 +519,7 @@ static void slab_stats(FILE *const out, const struct slab_chain *const sch)
         total_nr_slabs, total_used_slots, total_free_slots, occupancy);
 }
 
-static void slab_props(FILE *const out, const struct slab_chain *const sch)
+void slab_props(FILE *const out, const struct slab_chain *const sch)
 {
     assert(out != NULL);
     assert(sch != NULL);
@@ -556,3 +557,4 @@ static void slab_props(FILE *const out, const struct slab_chain *const sch)
             sch->slabsize
     );
 }
+#endif

@@ -17,17 +17,23 @@ typedef void (*cart_cb_t)(void);
 typedef uint64_t cart_timer_t, cart_chan_t, cart_store_t;
 typedef uint64_t cart_timer_interval_t;
 typedef uint64_t cart_timer_repeat_t;
+typedef uint8_t cart_timer_unit_t;
+
+enum {
+    CART_TIMER_UNIT_SEC = 0,
+    CART_TIMER_UNIT_USEC,
+    CART_TIMER_UNIT_NSEC,
+};
 
 void cart_log(const char *const fmt, ...) __attribute__((format(printf, 1, 2)));
 
-#define CART_TIMER_REPEAT ((cart_timer_repeat_t) 0)
-#define CART_TIMER_ONESHOT ((cart_timer_repeat_t) 1)
+#define CART_TIMER_REPEAT_INF ((cart_timer_repeat_t) 0)
 
 cart_timer_t cart_timer_new(void);
-cart_timer_t cart_timer_create(const cart_cb_t cb, const cart_timer_repeat_t repeat, const bool run, const cart_timer_interval_t interval);
-bool cart_timer_set_cb(const cart_timer_t tm, const cart_cb_t cb);
-bool cart_timer_set_repeat(const cart_timer_t tm, const cart_timer_repeat_t repeat);
-bool cart_timer_set_interval(const cart_timer_t tm, const cart_timer_interval_t interval);
-bool cart_timer_pause(const cart_timer_t tm);
-bool cart_timer_unpause(const cart_timer_t tm);
-bool cart_timer_del(const cart_timer_t tm);
+cart_timer_t cart_timer_add(cart_cb_t cb, cart_timer_repeat_t repeat, bool run, cart_timer_interval_t interval, cart_timer_unit_t unit, bool autodel);
+bool cart_timer_set_cb(cart_timer_t tm, cart_cb_t cb);
+bool cart_timer_set_repeat(cart_timer_t tm, cart_timer_repeat_t repeat);
+bool cart_timer_set_interval(cart_timer_t tm, cart_timer_interval_t interval, cart_timer_unit_t unit);
+bool cart_timer_pause(cart_timer_t tm);
+bool cart_timer_resume(cart_timer_t tm);
+bool cart_timer_del(cart_timer_t tm);

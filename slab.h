@@ -26,3 +26,11 @@ void *slab_alloc(struct slab_chain *);
 void slab_free(struct slab_chain *, const void *);
 void slab_traverse(const struct slab_chain *, void (*)(const void *));
 void slab_destroy(const struct slab_chain *);
+
+#ifndef NDEBUG
+#include <stdio.h>
+
+void slab_dump(FILE *, const struct slab_chain *);
+void slab_stats(FILE *, const struct slab_chain *);
+void slab_props(FILE *, const struct slab_chain *);
+#endif

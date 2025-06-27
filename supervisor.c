@@ -1,5 +1,8 @@
 #include "common.h"
 #include "sandbox.h"
+#include "supervisor.h"
+#include "timer.h"
+#include "hook.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +56,9 @@ static struct {
     .shmem = NULL,
     .do_quit = false,
 };
+
+/* needs to be a queue */
+static void (*pending_callback)(void) = NULL;
 
 static inline int set_fd_nonblock(const int fd)
 {
@@ -607,27 +613,45 @@ static inline void read_control_connection(void)
     }
 }
 
-static inline void process_sandbox_message(const sandbox_msg_t msg, uint8_t *const data)
+static inline void process_sandbox_message(const sandbox_msg_t msg, const uint64_t msg_data, uint8_t *const data)
 {
     switch (msg) {
     case SANDBOX_MSG_LOG:
         log_info("%s", data);
         break;
 
-    case SANDBOX_MSG_TIMER_NEW:
-        *((cart_timer_t *) data) = 5;
-        break;
-
-    case SANDBOX_MSG_TIMER_CREATE:
-        {
-            const struct cart_timer_create_args *args = (void *) data;
-            log_info("Timer create: %p %llu %u %llu", (void *) args->cb, args->repeat, args->run, args->interval);
-            *((cart_timer_t *) data) = 7;
-        }
+    case SANDBOX_MSG_CALL:
+        hook_execute(msg_data, data);
         break;
 
     default:
         log_warn("Unknown message: %u", msg);
+    }
+}
+
+static inline void send_pending_callback(void)
+{
+    if (!supervisor.shmem) {
+        return;
+    }
+
+    if (unlikely(pthread_mutex_lock(&supervisor.shmem->lock))) {
+        log_errno("Cannot lock shared memory mutex");
+        return;
+    }
+
+    if (supervisor.shmem->state == SANDBOX_STATE_IDLE && pending_callback) {
+        supervisor.shmem->ctl = SANDBOX_CTL_EXEC;
+        *(void (**const)(void)) supervisor.shmem->data = pending_callback;
+        pending_callback = NULL;
+
+        if (unlikely(pthread_cond_signal(&supervisor.shmem->cond))) {
+            log_errno("Cannot signal shared memory condition variable");
+        }
+    }
+
+    if (unlikely(pthread_mutex_unlock(&supervisor.shmem->lock))) {
+        log_errno("Cannot unlock shared memory mutex");
     }
 }
 
@@ -652,8 +676,16 @@ static inline void read_sandbox_ctlpipe(void)
         }
 
         if (likely(supervisor.shmem->msg != SANDBOX_MSG_CLEAR)) {
-            process_sandbox_message(supervisor.shmem->msg, supervisor.shmem->data);
+            process_sandbox_message(supervisor.shmem->msg, supervisor.shmem->msg_data, supervisor.shmem->data);
             supervisor.shmem->msg = SANDBOX_MSG_CLEAR;
+
+            if (unlikely(pthread_cond_signal(&supervisor.shmem->cond))) {
+                log_errno("Cannot signal shared memory condition variable");
+            }
+        } else if (supervisor.shmem->state == SANDBOX_STATE_IDLE && pending_callback) {
+            supervisor.shmem->ctl = SANDBOX_CTL_EXEC;
+            *(void (**const)(void)) supervisor.shmem->data = pending_callback;
+            pending_callback = NULL;
 
             if (unlikely(pthread_cond_signal(&supervisor.shmem->cond))) {
                 log_errno("Cannot signal shared memory condition variable");
@@ -730,7 +762,15 @@ static inline int event_loop(void)
                         log_info("Killing sandbox with pid %d", supervisor.sandbox_pid);
                         kill(supervisor.sandbox_pid, SIGKILL);
                     }
-                } else {
+                } else if (ev->ident >= 4096) {
+                    const size_t timer_idx = ev->ident - 4096;
+
+                    /* TODO: needs a proper queue */
+                    if ((pending_callback = timer_get_cb(timer_idx))) {
+                        send_pending_callback();
+                    }
+
+                    timer_accept_timeout(timer_idx);
                 }
                 break;
 
@@ -803,6 +843,73 @@ static inline int event_loop(void)
     }
 
     return EXIT_SUCCESS;
+}
+
+static inline int timer_unit_to_kqueue_flag(const timer_unit_t unit)
+{
+    switch (unit) {
+    case TIMER_UNIT_SEC:
+        return NOTE_SECONDS;
+
+    case TIMER_UNIT_USEC:
+        return NOTE_USECONDS;
+
+    case TIMER_UNIT_NSEC:
+        return NOTE_NSECONDS;
+
+    default:
+        return NOTE_SECONDS;
+    }
+}
+
+int supervisor_add_timer(const size_t timer_idx, const bool run, const timer_interval_t interval, const timer_unit_t unit)
+{
+    assert(supervisor.kqfd != -1);
+
+    if (unlikely(kevent_ctl(supervisor.kqfd, EVFILT_TIMER, 4096 + timer_idx,
+        EV_ADD | (run ? EV_ENABLE : EV_DISABLE), timer_unit_to_kqueue_flag(unit), interval, 0))) {
+
+        log_errno("Cannot add sandbox timeout timer");
+        return -1;
+    }
+
+    return 0;
+}
+
+int supervisor_del_timer(const size_t timer_idx)
+{
+    assert(supervisor.kqfd != -1);
+
+    if (unlikely(kevent_ctl(supervisor.kqfd, EVFILT_TIMER, 4096 + timer_idx, EV_DELETE, 0, 0, 0))) {
+        log_errno("Cannot delete sandbox timeout timer");
+        return -1;
+    }
+
+    return 0;
+}
+
+int supervisor_disable_timer(const size_t timer_idx)
+{
+    assert(supervisor.kqfd != -1);
+
+    if (unlikely(kevent_ctl(supervisor.kqfd, EVFILT_TIMER, 4096 + timer_idx, EV_DISABLE, 0, 0, 0))) {
+        log_errno("Cannot disable sandbox timeout timer");
+        return -1;
+    }
+
+    return 0;
+}
+
+int supervisor_enable_timer(const size_t timer_idx, const timer_interval_t interval, const timer_unit_t unit)
+{
+    assert(supervisor.kqfd != -1);
+
+    if (unlikely(kevent_ctl(supervisor.kqfd, EVFILT_TIMER, 4096 + timer_idx, EV_ENABLE, timer_unit_to_kqueue_flag(unit), interval, 0))) {
+        log_errno("Cannot enable sandbox timeout timer");
+        return -1;
+    }
+
+    return 0;
 }
 
 int main(const int argc, const char *const *const argv)

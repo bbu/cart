@@ -69,6 +69,7 @@ struct sandbox_shmem_header *sandbox_shmem_init(void)
 
     shmem->ctl = SANDBOX_CTL_CLEAR;
     shmem->msg = SANDBOX_MSG_CLEAR;
+    shmem->msg_data = 0;
     shmem->state = SANDBOX_STATE_INIT;
     shmem->do_quit = false;
     atomic_thread_fence(memory_order_seq_cst);
@@ -189,6 +190,28 @@ static inline void signal_and_wait(void)
     } while (sandbox.shmem->msg != SANDBOX_MSG_CLEAR);
 }
 
+const void *sandbox_call_supervisor(const size_t ret_size, const uint64_t data, const void *const args, const size_t args_size)
+{
+    static uint8_t ret[16] __attribute__((aligned(16)));
+
+    lock_or_abort(&sandbox.shmem->lock);
+    sandbox.shmem->msg = SANDBOX_MSG_CALL;
+    sandbox.shmem->msg_data = data;
+
+    if (args_size) {
+        memcpy(sandbox.shmem->data, args, args_size);
+    }
+
+    signal_and_wait();
+
+    if (ret_size) {
+        memcpy(ret, sandbox.shmem->data, ret_size);
+    }
+
+    unlock_or_abort(&sandbox.shmem->lock);
+    return ret;
+}
+
 void cart_log(const char *const fmt, ...)
 {
     va_list vargs;
@@ -208,28 +231,6 @@ void cart_log(const char *const fmt, ...)
     signal_and_wait();
     unlock_or_abort(&sandbox.shmem->lock);
     va_end(vargs);
-}
-
-cart_timer_t cart_timer_new(void)
-{
-    lock_or_abort(&sandbox.shmem->lock);
-    sandbox.shmem->msg = SANDBOX_MSG_TIMER_NEW;
-    signal_and_wait();
-    const cart_timer_t timer = *(const cart_timer_t *) sandbox.shmem->data;
-    unlock_or_abort(&sandbox.shmem->lock);
-    return timer;
-}
-
-cart_timer_t cart_timer_create(const cart_cb_t cb, const cart_timer_repeat_t repeat, const bool run, const cart_timer_interval_t interval)
-{
-    lock_or_abort(&sandbox.shmem->lock);
-    sandbox.shmem->msg = SANDBOX_MSG_TIMER_CREATE;
-    const struct cart_timer_create_args args = { cb, repeat, run ? 1 : 0, interval };
-    memcpy(sandbox.shmem->data, &args, sizeof(args));
-    signal_and_wait();
-    const cart_timer_t timer = *(const cart_timer_t *) sandbox.shmem->data;
-    unlock_or_abort(&sandbox.shmem->lock);	
-    return timer;
 }
 
 void sandbox_loop(void)
@@ -267,15 +268,17 @@ void sandbox_loop(void)
     for (;;) {
         lock_or_abort(&sandbox.shmem->lock);
         signal_supervisor();
-        sandbox.shmem->state = SANDBOX_STATE_WAITING;
+        sandbox.shmem->state = SANDBOX_STATE_IDLE;
 
         while (sandbox.shmem->ctl != SANDBOX_CTL_EXEC && !sandbox.shmem->do_quit) {
             wait_or_abort(&sandbox.shmem->cond, &sandbox.shmem->lock);
         }
 
-        void (*const callback)(void) = sandbox.shmem->do_quit ? NULL : (void (*)(void)) sandbox.shmem->data;
+        void (*const callback)(void) = sandbox.shmem->do_quit ? NULL :
+            *(void (**const)(void)) sandbox.shmem->data;
+
         sandbox.shmem->ctl = SANDBOX_CTL_CLEAR;
-        sandbox.shmem->state = SANDBOX_STATE_EXECUTING;
+        sandbox.shmem->state = SANDBOX_STATE_EXEC;
         unlock_or_abort(&sandbox.shmem->lock);
 
         if (likely(callback)) {
