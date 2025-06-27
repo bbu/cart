@@ -31,7 +31,7 @@ cart_timer_t cart_timer_new(void)
 
 static void hook_timer_new(void *const data)
 {
-	*((cart_timer_t *) data) = timer_new();
+    *((cart_timer_t *) data) = timer_new();
 }
 
 /*****************************************************************************/
@@ -57,9 +57,9 @@ cart_timer_t cart_timer_add(const cart_cb_t cb, const cart_timer_repeat_t repeat
 
 static void hook_timer_add(void *const data)
 {
-	const struct cart_timer_add_args *args = data;
-	const cart_timer_t handle = timer_add(args->cb, args->repeat, args->run, args->interval, args->unit, args->autodel);
-	*((cart_timer_t *) data) = handle;
+    const struct cart_timer_add_args *args = data;
+    const cart_timer_t handle = timer_add(args->cb, args->repeat, args->run, args->interval, args->unit, args->autodel);
+    *((cart_timer_t *) data) = handle;
 }
 
 /*****************************************************************************/
@@ -80,16 +80,16 @@ bool cart_timer_set_cb(const cart_timer_t tm, const cart_cb_t cb)
 
 static void hook_timer_set_cb(void *const data)
 {
-	const struct cart_timer_set_cb_args *args = data;
-	const bool done = timer_set_cb(args->tm, args->cb);
-	*((bool *) data) = done;
+    const struct cart_timer_set_cb_args *args = data;
+    const bool done = timer_set_cb(args->tm, args->cb);
+    *((bool *) data) = done;
 }
 
 /*****************************************************************************/
 
 struct cart_timer_set_repeat_args {
-	const cart_timer_t tm;
-	const cart_timer_repeat_t repeat;
+    const cart_timer_t tm;
+    const cart_timer_repeat_t repeat;
 };
 
 static_assert(sizeof(struct cart_timer_set_repeat_args) <= SANDBOX_SHMEM_DATA_SIZE, "Args cannot fit in shared region");
@@ -103,17 +103,17 @@ bool cart_timer_set_repeat(const cart_timer_t tm, const cart_timer_repeat_t repe
 
 static void hook_timer_set_repeat(void *const data)
 {
-	const struct cart_timer_set_repeat_args *args = data;
-	const bool done = timer_set_repeat(args->tm, args->repeat);
-	*((bool *) data) = done;
+    const struct cart_timer_set_repeat_args *args = data;
+    const bool done = timer_set_repeat(args->tm, args->repeat);
+    *((bool *) data) = done;
 }
 
 /*****************************************************************************/
 
 struct cart_timer_set_interval_args {
-	const cart_timer_t tm;
-	const cart_timer_interval_t interval;
-	const cart_timer_unit_t unit;
+    const cart_timer_t tm;
+    const cart_timer_interval_t interval;
+    const cart_timer_unit_t unit;
 };
 
 static_assert(sizeof(struct cart_timer_set_interval_args) <= SANDBOX_SHMEM_DATA_SIZE, "Args cannot fit in shared region");
@@ -127,15 +127,15 @@ bool cart_timer_set_interval(const cart_timer_t tm, const cart_timer_interval_t 
 
 static void hook_timer_set_interval(void *const data)
 {
-	const struct cart_timer_set_interval_args *args = data;
-	const bool done = timer_set_interval(args->tm, args->interval, args->unit);
-	*((bool *) data) = done;
+    const struct cart_timer_set_interval_args *args = data;
+    const bool done = timer_set_interval(args->tm, args->interval, args->unit);
+    *((bool *) data) = done;
 }
 
 /*****************************************************************************/
 
 struct cart_timer_pause_args {
-	const cart_timer_t tm;
+    const cart_timer_t tm;
 };
 
 static_assert(sizeof(struct cart_timer_pause_args) <= SANDBOX_SHMEM_DATA_SIZE, "Args cannot fit in shared region");
@@ -149,15 +149,15 @@ bool cart_timer_pause(const cart_timer_t tm)
 
 static void hook_timer_pause(void *const data)
 {
-	const struct cart_timer_pause_args *args = data;
-	const bool done = timer_pause(args->tm);
-	*((bool *) data) = done;
+    const struct cart_timer_pause_args *args = data;
+    const bool done = timer_pause(args->tm);
+    *((bool *) data) = done;
 }
 
 /*****************************************************************************/
 
 struct cart_timer_resume_args {
-	const cart_timer_t tm;
+    const cart_timer_t tm;
 };
 
 static_assert(sizeof(struct cart_timer_resume_args) <= SANDBOX_SHMEM_DATA_SIZE, "Args cannot fit in shared region");
@@ -171,15 +171,15 @@ bool cart_timer_resume(const cart_timer_t tm)
 
 static void hook_timer_resume(void *const data)
 {
-	const struct cart_timer_resume_args *args = data;
-	const bool done = timer_resume(args->tm);
-	*((bool *) data) = done;
+    const struct cart_timer_resume_args *args = data;
+    const bool done = timer_resume(args->tm);
+    *((bool *) data) = done;
 }
 
 /*****************************************************************************/
 
 struct cart_timer_del_args {
-	const cart_timer_t tm;
+    const cart_timer_t tm;
 };
 
 static_assert(sizeof(struct cart_timer_del_args) <= SANDBOX_SHMEM_DATA_SIZE, "Args cannot fit in shared region");
@@ -193,31 +193,31 @@ bool cart_timer_del(const cart_timer_t tm)
 
 static void hook_timer_del(void *const data)
 {
-	const struct cart_timer_del_args *args = data;
-	const bool done = timer_del(args->tm);
-	*((bool *) data) = done;
+    const struct cart_timer_del_args *args = data;
+    const bool done = timer_del(args->tm);
+    *((bool *) data) = done;
 }
 
 /*****************************************************************************/
 
 static void (*const hooks[])(void *const) = {
-	hook_timer_new,
-	hook_timer_add,
-	hook_timer_set_cb,
-	hook_timer_set_repeat,
-	hook_timer_set_interval,
-	hook_timer_pause,
-	hook_timer_resume,
-	hook_timer_del,
+    hook_timer_new,
+    hook_timer_add,
+    hook_timer_set_cb,
+    hook_timer_set_repeat,
+    hook_timer_set_interval,
+    hook_timer_pause,
+    hook_timer_resume,
+    hook_timer_del,
 };
 
 static_assert(countof(hooks) == ID_COUNT, "Hooks are mismatched");
 
 void hook_execute(const uint64_t id, void *const data)
 {
-	if (likely(id < ID_COUNT)) {
-		hooks[id](data);
-	} else {
-		log_error("Cannot execute hook number %" PRIu64, id);
-	}
+    if (likely(id < ID_COUNT)) {
+        hooks[id](data);
+    } else {
+        log_error("Cannot execute hook number %" PRIu64, id);
+    }
 }
