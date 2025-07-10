@@ -25,3 +25,6 @@
 
 #define log_error(fmt, ...) \
     printf("%lu [ERR ] (%s:%u) " fmt "\n", time(NULL), __FILE__, __LINE__, ##__VA_ARGS__)
+
+#define log_app(fmt, ...) \
+    printf("%lu [APPL] " fmt "\n", time(NULL), ##__VA_ARGS__)

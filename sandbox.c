@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <time.h>
 #include <stdatomic.h>
 #include <unistd.h>
 #include <dlfcn.h>
@@ -22,6 +23,19 @@ static struct {
     .ctlpipe_wfd = -1,
     .shmem = NULL,
 };
+
+static int get_monotonic_time(uint64_t *const value)
+{
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts)) {
+        log_errno("Cannot get monotonic time");
+        return -1;
+    }
+
+    *value = (uint64_t) ts.tv_sec * (uint64_t) 1000000000 + (uint64_t) ts.tv_nsec;
+    return 0;
+}
 
 struct sandbox_shmem_header *sandbox_shmem_init(void)
 {
@@ -69,7 +83,6 @@ struct sandbox_shmem_header *sandbox_shmem_init(void)
 
     shmem->ctl = SANDBOX_CTL_CLEAR;
     shmem->msg = SANDBOX_MSG_CLEAR;
-    shmem->msg_data = 0;
     shmem->state = SANDBOX_STATE_INIT;
     shmem->do_quit = false;
     atomic_thread_fence(memory_order_seq_cst);
@@ -190,22 +203,22 @@ static inline void signal_and_wait(void)
     } while (sandbox.shmem->msg != SANDBOX_MSG_CLEAR);
 }
 
-const void *sandbox_call_supervisor(const size_t ret_size, const uint64_t data, const void *const args, const size_t args_size)
+const void *sandbox_call_supervisor(const size_t ret_size, const uint64_t call_id, const void *const args, const size_t args_size)
 {
     static uint8_t ret[16] __attribute__((aligned(16)));
 
     lock_or_abort(&sandbox.shmem->lock);
     sandbox.shmem->msg = SANDBOX_MSG_CALL;
-    sandbox.shmem->msg_data = data;
+    *(uint64_t *) sandbox.shmem->data = call_id;
 
     if (args_size) {
-        memcpy(sandbox.shmem->data, args, args_size);
+        memcpy(sandbox.shmem->data + 16, args, args_size);
     }
 
     signal_and_wait();
 
     if (ret_size) {
-        memcpy(ret, sandbox.shmem->data, ret_size);
+        memcpy(ret, sandbox.shmem->data + 16, ret_size);
     }
 
     unlock_or_abort(&sandbox.shmem->lock);

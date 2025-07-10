@@ -2,13 +2,25 @@
 #include "supervisor.h"
 #include "common.h"
 
-#include <stddef.h>
-#include <sys/types.h>
+#define HANDLE_NULL       ((timer_t) 0x0000000000000000ull)
+#define HANDLE_MAGIC_MASK ((timer_t) 0xFF00000000000000ull)
+#define HANDLE_MAGIC_BITS ((timer_t) 0xAA00000000000000ull)
 
-#define MAGIC_HANDLE_MASK ((timer_t) 0xFF00000000000000ull)
-#define MAGIC_HANDLE_BITS ((timer_t) 0xAA00000000000000ull)
+static inline bool handle_check_magic(const timer_t tm)
+{
+    return (tm & HANDLE_MAGIC_MASK) != HANDLE_MAGIC_BITS;
+}
 
-#define null_handle ((timer_t) 0)
+static inline size_t handle_remove_magic(const timer_t tm)
+{
+    return (size_t) (tm ^ HANDLE_MAGIC_BITS);
+}
+
+static inline timer_t handle_put_magic(const size_t idx)
+{
+    return (timer_t) idx | HANDLE_MAGIC_BITS;
+}
+
 #define MAX_TIMERS ((size_t) 4096)
 
 static struct {
@@ -45,19 +57,14 @@ timer_cb_t timer_get_cb(const size_t timer_idx)
     return timers[timer_idx].cb;
 }
 
-static inline bool check_handle_magic(const timer_t tm)
+void timer_delete_all(void)
 {
-    return (tm & MAGIC_HANDLE_MASK) != MAGIC_HANDLE_BITS;
-}
-
-static inline size_t remove_handle_magic(const timer_t tm)
-{
-    return (size_t) (tm ^ MAGIC_HANDLE_BITS);
-}
-
-static inline timer_t put_handle_magic(const size_t idx)
-{
-    return (timer_t) idx | MAGIC_HANDLE_BITS;
+    for (size_t idx = 0; idx < MAX_TIMERS; ++idx) {
+        if (timers[idx].in_use) {
+            supervisor_del_timer(idx);
+            memset(timers + idx, 0, sizeof(timers[idx]));
+        }
+    }
 }
 
 static inline size_t find_free_timer(void)
@@ -83,17 +90,17 @@ static inline size_t find_free_timer(void)
 
 static inline size_t check_handle(const timer_t tm)
 {
-    if (unlikely(tm == null_handle)) {
+    if (unlikely(tm == HANDLE_NULL)) {
         log_warn("Timer handle is null");
         return MAX_TIMERS;
     }
 
-    if (unlikely(check_handle_magic(tm))) {
+    if (unlikely(handle_check_magic(tm))) {
         log_warn("Timer handle invalid: %016llX does not have initial 'AA' bits", tm);
         return MAX_TIMERS;
     }
 
-    const size_t idx = remove_handle_magic(tm);
+    const size_t idx = handle_remove_magic(tm);
 
     if (unlikely(idx >= MAX_TIMERS)) {
         log_warn("Timer handle out of bounds (%zu): %016llX", MAX_TIMERS, tm);
@@ -114,11 +121,11 @@ timer_t timer_new(void)
 
     if (unlikely(free_idx == MAX_TIMERS)) {
         log_warn("Timer limit of %zu exceeded", MAX_TIMERS);
-        return null_handle;
+        return HANDLE_NULL;
     }
 
     if (unlikely(supervisor_add_timer(free_idx, false, 1, TIMER_UNIT_SEC))) {
-        return null_handle;
+        return HANDLE_NULL;
     }
 
     timers[free_idx].in_use = true;
@@ -130,7 +137,7 @@ timer_t timer_new(void)
     timers[free_idx].running = false;
     timers[free_idx].autodel = false;
 
-    return put_handle_magic(free_idx);
+    return handle_put_magic(free_idx);
 }
 
 timer_t timer_add(const timer_cb_t cb, const timer_repeat_t repeat, const bool run, const timer_interval_t interval, const timer_unit_t unit, const bool autodel)
@@ -139,11 +146,11 @@ timer_t timer_add(const timer_cb_t cb, const timer_repeat_t repeat, const bool r
 
     if (unlikely(free_idx == MAX_TIMERS)) {
         log_warn("Timer limit of %zu exceeded", MAX_TIMERS);
-        return null_handle;
+        return HANDLE_NULL;
     }
 
     if (unlikely(supervisor_add_timer(free_idx, run, interval, unit))) {
-        return null_handle;
+        return HANDLE_NULL;
     }
 
     timers[free_idx].in_use = true;
@@ -155,7 +162,7 @@ timer_t timer_add(const timer_cb_t cb, const timer_repeat_t repeat, const bool r
     timers[free_idx].running = run;
     timers[free_idx].autodel = autodel;
 
-    return put_handle_magic(free_idx);
+    return handle_put_magic(free_idx);
 }
 
 bool timer_set_cb(const timer_t tm, const timer_cb_t cb)

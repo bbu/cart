@@ -36,7 +36,6 @@ struct sandbox_shmem_header {
     pthread_cond_t cond;
     sandbox_ctl_t ctl;
     sandbox_msg_t msg;
-    uint64_t msg_data;
     sandbox_state_t state;
     bool do_quit;
     uint8_t data[] __attribute__((aligned(16)));
@@ -50,4 +49,4 @@ int sandbox_notify_quit(struct sandbox_shmem_header *);
 /* Called only in the sandbox child process */
 void sandbox_init(const char *appname, int ctlpipe_wfd, struct sandbox_shmem_header *);
 void sandbox_loop(void);
-const void *sandbox_call_supervisor(size_t ret_size, uint64_t data, const void *args, size_t args_size);
+const void *sandbox_call_supervisor(size_t ret_size, uint64_t call_id, const void *args, size_t args_size);

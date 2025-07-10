@@ -4,9 +4,11 @@
 #include "assert.h"
 
 #include "timer.h"
+#include "chan.h"
 
 #include "include/cart.h"
 
+#include <stdint.h>
 #include <inttypes.h>
 
 enum {
@@ -18,6 +20,9 @@ enum {
     ID_TIMER_PAUSE,
     ID_TIMER_RESUME,
     ID_TIMER_DEL,
+
+    ID_CHAN_NEW,
+    ID_CHAN_DEL,
 
     ID_COUNT
 };
@@ -45,8 +50,6 @@ struct cart_timer_add_args {
     const bool autodel;
 };
 
-static_assert(sizeof(struct cart_timer_add_args) <= SANDBOX_SHMEM_DATA_SIZE, "Args cannot fit in shared region");
-
 cart_timer_t cart_timer_add(const cart_cb_t cb, const cart_timer_repeat_t repeat, const bool run,
     const cart_timer_interval_t interval, const cart_timer_unit_t unit, const bool autodel)
 {
@@ -69,8 +72,6 @@ struct cart_timer_set_cb_args {
     const cart_cb_t cb;
 };
 
-static_assert(sizeof(struct cart_timer_set_cb_args) <= SANDBOX_SHMEM_DATA_SIZE, "Args cannot fit in shared region");
-
 bool cart_timer_set_cb(const cart_timer_t tm, const cart_cb_t cb)
 {
     return *(const bool *) sandbox_call_supervisor(sizeof(bool), ID_TIMER_SET_CB,
@@ -91,8 +92,6 @@ struct cart_timer_set_repeat_args {
     const cart_timer_t tm;
     const cart_timer_repeat_t repeat;
 };
-
-static_assert(sizeof(struct cart_timer_set_repeat_args) <= SANDBOX_SHMEM_DATA_SIZE, "Args cannot fit in shared region");
 
 bool cart_timer_set_repeat(const cart_timer_t tm, const cart_timer_repeat_t repeat)
 {
@@ -116,8 +115,6 @@ struct cart_timer_set_interval_args {
     const cart_timer_unit_t unit;
 };
 
-static_assert(sizeof(struct cart_timer_set_interval_args) <= SANDBOX_SHMEM_DATA_SIZE, "Args cannot fit in shared region");
-
 bool cart_timer_set_interval(const cart_timer_t tm, const cart_timer_interval_t interval, const cart_timer_unit_t unit)
 {
     return *(const bool *) sandbox_call_supervisor(sizeof(bool), ID_TIMER_SET_INTERVAL,
@@ -137,8 +134,6 @@ static void hook_timer_set_interval(void *const data)
 struct cart_timer_pause_args {
     const cart_timer_t tm;
 };
-
-static_assert(sizeof(struct cart_timer_pause_args) <= SANDBOX_SHMEM_DATA_SIZE, "Args cannot fit in shared region");
 
 bool cart_timer_pause(const cart_timer_t tm)
 {
@@ -160,8 +155,6 @@ struct cart_timer_resume_args {
     const cart_timer_t tm;
 };
 
-static_assert(sizeof(struct cart_timer_resume_args) <= SANDBOX_SHMEM_DATA_SIZE, "Args cannot fit in shared region");
-
 bool cart_timer_resume(const cart_timer_t tm)
 {
     return *(const bool *) sandbox_call_supervisor(sizeof(bool), ID_TIMER_RESUME,
@@ -182,8 +175,6 @@ struct cart_timer_del_args {
     const cart_timer_t tm;
 };
 
-static_assert(sizeof(struct cart_timer_del_args) <= SANDBOX_SHMEM_DATA_SIZE, "Args cannot fit in shared region");
-
 bool cart_timer_del(const cart_timer_t tm)
 {
     return *(const bool *) sandbox_call_supervisor(sizeof(bool), ID_TIMER_DEL,
@@ -200,6 +191,38 @@ static void hook_timer_del(void *const data)
 
 /*****************************************************************************/
 
+cart_chan_t cart_chan_new(void)
+{
+    return *(const cart_chan_t *) sandbox_call_supervisor(sizeof(cart_chan_t), ID_CHAN_NEW, NULL, 0);
+}
+
+static void hook_chan_new(void *const data)
+{
+    *((cart_chan_t *) data) = chan_new();
+}
+
+/*****************************************************************************/
+
+struct cart_chan_del_args {
+    const cart_chan_t ch;
+};
+
+bool cart_chan_del(const cart_chan_t ch)
+{
+    return *(const bool *) sandbox_call_supervisor(sizeof(bool), ID_CHAN_DEL,
+        &(const struct cart_chan_del_args) { ch },
+        sizeof(struct cart_chan_del_args));
+}
+
+static void hook_chan_del(void *const data)
+{
+    const struct cart_chan_del_args *args = data;
+    const bool done = chan_del(args->ch);
+    *((bool *) data) = done;
+}
+
+/*****************************************************************************/
+
 static void (*const hooks[])(void *const) = {
     hook_timer_new,
     hook_timer_add,
@@ -209,15 +232,20 @@ static void (*const hooks[])(void *const) = {
     hook_timer_pause,
     hook_timer_resume,
     hook_timer_del,
+
+    hook_chan_new,
+    hook_chan_del,
 };
 
 static_assert(countof(hooks) == ID_COUNT, "Hooks are mismatched");
 
-void hook_execute(const uint64_t id, void *const data)
+void hook_execute(void *const data)
 {
-    if (likely(id < ID_COUNT)) {
-        hooks[id](data);
+    const uint64_t call_id = *(const uint64_t *) data;
+
+    if (likely(call_id < ID_COUNT)) {
+        hooks[call_id]((uint8_t *) data + 16);
     } else {
-        log_error("Cannot execute hook number %" PRIu64, id);
+        log_error("Cannot execute hook number %" PRIu64, call_id);
     }
 }

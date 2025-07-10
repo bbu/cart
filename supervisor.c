@@ -10,19 +10,25 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <ctype.h>
 #include <assert.h>
 #include <fcntl.h>
 #include <termios.h>
 
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/event.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/mman.h>
 
-#define CONTROL_SOCKET_NAME "/tmp/cartctl.sock"
+#define CONTROL_DIR_BASENAME "/tmp"
+
+#define CONTROL_SOCKET_NAME "ctl.sock"
 #define CONTROL_SOCKET_BACKLOG 5
+
+#define UDATA_FIFO ((void *) (uintptr_t) 1)
 
 #define kevent_ctl_many(kqfd, changes, nchanges) \
     kevent(kqfd, changes, nchanges, NULL, 0, NULL)
@@ -41,18 +47,21 @@
     kevent(kqfd, NULL, 0, events, nevents, NULL)
 
 static struct {
-    int kqfd, ctlsockfd, ctlconnfd;
+    int kqfd;
+    int ctl_sockfd, ctl_connfd;
     pid_t sandbox_pid;
+    char run_dirname[32];
+    int run_base_dirfd, run_dirfd;
     int sandbox_ctlpipe_rfd, sandbox_outpipe_rfd;
     struct sandbox_shmem_header *shmem;
     bool do_quit;
 } supervisor = {
     .kqfd = -1,
-    .ctlsockfd = -1,
-    .ctlconnfd = -1,
+    .ctl_sockfd = -1, .ctl_connfd = -1,
     .sandbox_pid = -1,
-    .sandbox_ctlpipe_rfd = -1,
-    .sandbox_outpipe_rfd = -1,
+    .run_dirname = "",
+    .run_base_dirfd = -1, .run_dirfd = -1,
+    .sandbox_ctlpipe_rfd = -1, .sandbox_outpipe_rfd = -1,
     .shmem = NULL,
     .do_quit = false,
 };
@@ -144,8 +153,8 @@ static inline int spawn_sandbox(const char *const appname)
         goto fail_destroy_shmem;
     } else if (supervisor.sandbox_pid == 0) {
         close(supervisor.kqfd);
-        close(supervisor.ctlconnfd);
-        close(supervisor.ctlsockfd);
+        close(supervisor.ctl_connfd);
+        close(supervisor.ctl_sockfd);
         close(supervisor.sandbox_ctlpipe_rfd);
         close(supervisor.sandbox_outpipe_rfd);
         close(STDIN_FILENO);
@@ -416,7 +425,7 @@ static inline void process_control_command(char *const buf)
 static inline int arm_filters(void)
 {
     assert(supervisor.kqfd != -1);
-    assert(supervisor.ctlsockfd != -1);
+    assert(supervisor.ctl_sockfd != -1);
 
     const struct kevent events[] = {
         { .filter = EVFILT_SIGNAL, .ident = SIGUSR1, .flags = EV_ADD, .udata = "USR1" },
@@ -427,7 +436,7 @@ static inline int arm_filters(void)
 
         {
             .filter = EVFILT_READ,  
-            .ident = supervisor.ctlsockfd,
+            .ident = supervisor.ctl_sockfd,
             .flags = EV_ADD
         },
 
@@ -462,53 +471,96 @@ static inline int arm_filters(void)
 
 static inline int create_control_socket(void)
 {
-    const int sock_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-
-    if (unlikely(sock_fd == -1)) {
+    if (unlikely((supervisor.ctl_sockfd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1)) {
         log_errno("Cannot create control socket");
-        goto out;
+        return -1;
     }
 
-    if (unlikely(set_fd_nonblock(sock_fd))) {
-        goto out_close;
+    if (unlikely(set_fd_nonblock(supervisor.ctl_sockfd))) {
+        return -1;
     }
 
-    remove(CONTROL_SOCKET_NAME);
+    if (unlikely(unlinkat(supervisor.run_dirfd, CONTROL_SOCKET_NAME, 0) && errno != ENOENT)) {
+        log_errno("Cannot remove old control socket");
+        return -1;
+    }
 
-    if (unlikely(bind(sock_fd, (const struct sockaddr *) &(const struct sockaddr_un)
-        { .sun_family = AF_UNIX, .sun_path = CONTROL_SOCKET_NAME }, sizeof(struct sockaddr_un)))) {
+    struct sockaddr_un sa_unix;
+    sa_unix.sun_family = AF_UNIX;
 
+    const int nbytes = snprintf(sa_unix.sun_path, sizeof(sa_unix.sun_path),
+        "%s/%s/%s", CONTROL_DIR_BASENAME, supervisor.run_dirname, CONTROL_SOCKET_NAME);
+
+    if (unlikely(nbytes < 0)) {
+        log_errno("Cannot format control socket path");
+        return -1;
+    } else if (unlikely((size_t) nbytes >= sizeof(sa_unix.sun_path))) {
+        log_error("Cannot fit %d bytes in socket path buffer sized %zu bytes", nbytes + 1, sizeof(sa_unix.sun_path));
+        return -1;
+    }
+
+    if (unlikely(bind(supervisor.ctl_sockfd, (const struct sockaddr *) &sa_unix, sizeof(sa_unix)))) {
         log_errno("Cannot bind control socket");
-        goto out_close;
+        return -1;
     }
 
-    if (unlikely(listen(sock_fd, CONTROL_SOCKET_BACKLOG))) {
+    if (unlikely(listen(supervisor.ctl_sockfd, CONTROL_SOCKET_BACKLOG))) {
         log_errno("Cannot set control socket to listen");
-        goto out_close;
+        return -1;
     }
 
-    return sock_fd;
+    return 0;
+}
 
-out_close:
-    close(sock_fd);
-out:
-    return -1;
+static inline int create_control_dir(void)
+{
+    if (unlikely((supervisor.run_base_dirfd = open(CONTROL_DIR_BASENAME, O_DIRECTORY)) == -1)) {
+        log_errno("Cannot open runtime directory");
+        return -1;
+    }
+
+    const int nbytes = snprintf(supervisor.run_dirname, sizeof(supervisor.run_dirname), "cart-%jd", (intmax_t) getpid());
+
+    if (unlikely(nbytes < 0)) {
+        log_errno("Cannot format control directory name");
+        return -1;
+    } else if (unlikely((size_t) nbytes >= sizeof(supervisor.run_dirname))) {
+        log_error("Cannot fit %d bytes in control directory name buffer sized %zu bytes", nbytes + 1, sizeof(supervisor.run_dirname));
+        return -1;
+    }
+
+    if (unlikely(unlinkat(supervisor.run_base_dirfd, supervisor.run_dirname, 0) && errno != ENOENT)) {
+        log_errno("Cannot remove old runtime directory");
+        return -1;
+    }
+
+    if (unlikely(mkdirat(supervisor.run_base_dirfd, supervisor.run_dirname, S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH))) {
+        log_errno("Cannot create control directory");
+        return -1;
+    }
+
+    if (unlikely((supervisor.run_dirfd = openat(supervisor.run_base_dirfd, supervisor.run_dirname, O_DIRECTORY)) == -1)) {
+        log_errno("Cannot open newly created runtime directory");
+        return -1;
+    }
+
+    return 0;
 }
 
 static inline void close_control_connection(void)
 {
-    assert(supervisor.ctlconnfd != -1);
+    assert(supervisor.ctl_connfd != -1);
 
-    if (unlikely(close(supervisor.ctlconnfd))) {
+    if (unlikely(close(supervisor.ctl_connfd))) {
         log_errno("Cannot close control connection");
     }
 
-    supervisor.ctlconnfd = -1;
+    supervisor.ctl_connfd = -1;
 }
 
 static void write_control_response(const char *const fmt, ...)
 {
-    if (supervisor.ctlconnfd == -1) {
+    if (supervisor.ctl_connfd == -1) {
         log_warn("Cannot write control response because control connection is closed");
         return;
     }
@@ -531,7 +583,7 @@ static void write_control_response(const char *const fmt, ...)
     }
 
     buf[nbytes] = '\n';
-    const ssize_t written = write(supervisor.ctlconnfd, buf, nbytes + 1);
+    const ssize_t written = write(supervisor.ctl_connfd, buf, nbytes + 1);
 
     if (written == -1) {
         log_errno("Cannot write to control connection");
@@ -545,11 +597,11 @@ static void write_control_response(const char *const fmt, ...)
 
 static void write_control_prompt(void)
 {
-    if (supervisor.ctlconnfd == -1) {
+    if (supervisor.ctl_connfd == -1) {
         return;
     }
 
-    const ssize_t written = write(supervisor.ctlconnfd, "> ", 2);
+    const ssize_t written = write(supervisor.ctl_connfd, "> ", 2);
 
     if (written == -1) {
         log_errno("Cannot write to control connection");
@@ -563,13 +615,13 @@ static void write_control_prompt(void)
 
 static inline void accept_control_connection(void)
 {
-    const int conn_fd = accept(supervisor.ctlsockfd, NULL, NULL);
+    const int conn_fd = accept(supervisor.ctl_sockfd, NULL, NULL);
 
     if (unlikely(conn_fd == -1)) {
         if (errno != EWOULDBLOCK && errno != EAGAIN) {
             log_errno("Cannot accept control connection");
         }
-    } else if (supervisor.ctlconnfd != -1) {
+    } else if (supervisor.ctl_connfd != -1) {
         close(conn_fd);
         log_info("Refusing second control connection");
     } else {
@@ -586,7 +638,7 @@ static inline void accept_control_connection(void)
             return;
         }
 
-        supervisor.ctlconnfd = conn_fd;
+        supervisor.ctl_connfd = conn_fd;
         write_control_response("cart v1.0.0");
         write_control_prompt();
     }
@@ -595,7 +647,7 @@ static inline void accept_control_connection(void)
 static inline void read_control_connection(void)
 {
     static char buf[4096 + 1];
-    const ssize_t nread = read(supervisor.ctlconnfd, buf, sizeof(buf) - 1);
+    const ssize_t nread = read(supervisor.ctl_connfd, buf, sizeof(buf) - 1);
 
     if (unlikely(nread == -1)) {
         if (errno != EWOULDBLOCK && errno != EAGAIN) {
@@ -613,15 +665,15 @@ static inline void read_control_connection(void)
     }
 }
 
-static inline void process_sandbox_message(const sandbox_msg_t msg, const uint64_t msg_data, uint8_t *const data)
+static inline void process_sandbox_message(const sandbox_msg_t msg, void *const data)
 {
     switch (msg) {
     case SANDBOX_MSG_LOG:
-        log_info("%s", data);
+        log_app("%s", (const char *) data);
         break;
 
     case SANDBOX_MSG_CALL:
-        hook_execute(msg_data, data);
+        hook_execute(data);
         break;
 
     default:
@@ -676,7 +728,7 @@ static inline void read_sandbox_ctlpipe(void)
         }
 
         if (likely(supervisor.shmem->msg != SANDBOX_MSG_CLEAR)) {
-            process_sandbox_message(supervisor.shmem->msg, supervisor.shmem->msg_data, supervisor.shmem->data);
+            process_sandbox_message(supervisor.shmem->msg, supervisor.shmem->data);
             supervisor.shmem->msg = SANDBOX_MSG_CLEAR;
 
             if (unlikely(pthread_cond_signal(&supervisor.shmem->cond))) {
@@ -743,9 +795,11 @@ static inline int event_loop(void)
 
             switch (ev->filter) {
             case EVFILT_READ:
-                if ((int) ev->ident == supervisor.ctlsockfd) {
+                if (ev->udata == UDATA_FIFO) {
+                    (void) 0;
+                } else if ((int) ev->ident == supervisor.ctl_sockfd) {
                     accept_control_connection();
-                } else if ((int) ev->ident == supervisor.ctlconnfd) {
+                } else if ((int) ev->ident == supervisor.ctl_connfd) {
                     read_control_connection();
                 } else if ((int) ev->ident == supervisor.sandbox_ctlpipe_rfd) {
                     read_sandbox_ctlpipe();
@@ -757,11 +811,9 @@ static inline int event_loop(void)
             case EVFILT_TIMER:
                 if (ev->ident == 0) {
                     //log_info("Idle timer");
-                } else if (ev->ident == 1) {
-                    if (supervisor.sandbox_pid != -1) {
-                        log_info("Killing sandbox with pid %d", supervisor.sandbox_pid);
-                        kill(supervisor.sandbox_pid, SIGKILL);
-                    }
+                } else if (ev->ident == 1 && supervisor.sandbox_pid != -1) {
+                    log_warn("Killing non-responding sandbox with pid %d", supervisor.sandbox_pid);
+                    kill(supervisor.sandbox_pid, SIGKILL);
                 } else if (ev->ident >= 4096) {
                     const size_t timer_idx = ev->ident - 4096;
 
@@ -791,6 +843,7 @@ static inline int event_loop(void)
                         }
 
                         kevent_ctl(supervisor.kqfd, EVFILT_TIMER, 1, EV_DELETE, 0, 0, 0);
+                        timer_delete_all();
                         supervisor.sandbox_pid = -1;
                         sandbox_shmem_destroy(supervisor.shmem);
                         supervisor.shmem = NULL;
@@ -808,6 +861,8 @@ static inline int event_loop(void)
                         if (do_delayed_quit) {
                             supervisor.do_quit = true;
                         }
+
+                        pending_callback = NULL;
                     }
                 }
 
@@ -912,8 +967,118 @@ int supervisor_enable_timer(const size_t timer_idx, const timer_interval_t inter
     return 0;
 }
 
+int supervisor_create_fifo(const char *const name)
+{
+    assert(supervisor.kqfd != -1);
+
+    if (unlikely(mkfifoat(supervisor.run_dirfd, name, S_IRUSR | S_IWUSR | S_IWGRP | S_IWOTH) == -1)) {
+        log_errno("Cannot create FIFO");
+        return -1;
+    }
+
+    const int fifo_fd = openat(supervisor.run_dirfd, name, O_RDONLY | O_NONBLOCK);
+
+    if (unlikely(fifo_fd == -1)) {
+        log_errno("Cannot open FIFO");
+        return -1;
+    }
+
+    if (unlikely(kevent_ctl(supervisor.kqfd, EVFILT_READ, fifo_fd, EV_ADD | EV_ENABLE, 0, 0, UDATA_FIFO))) {
+        log_errno("Cannot add FIFO");
+        return -1;
+    }
+
+    return 0;
+}
+
+static inline int init(void)
+{
+    if (unlikely((supervisor.kqfd = kqueue()) == -1)) {
+        log_errno("Cannot create kqueue");
+        return -1;
+    }
+
+    if (unlikely(create_control_dir()) ||
+        unlikely(create_control_socket()) ||
+        unlikely(arm_filters())) {
+
+        return -1;
+    }
+
+    return 0;
+}
+
+static inline void deinit(void)
+{
+    if (supervisor.run_dirfd != -1 &&
+        unlikely(unlinkat(supervisor.run_dirfd, CONTROL_SOCKET_NAME, 0)) &&
+        unlikely(errno != ENOENT)) {
+
+        log_errno("Cannot remove control socket");
+    }
+
+    if (supervisor.run_dirfd != -1 && unlikely(close(supervisor.run_dirfd))) {
+        log_errno("Cannot close control directory");
+    }
+
+    if (supervisor.run_base_dirfd != -1 &&
+        unlikely(unlinkat(supervisor.run_base_dirfd, supervisor.run_dirname, AT_REMOVEDIR)) &&
+        unlikely(errno != ENOENT)) {
+
+        log_errno("Cannot remove control directory");
+    }
+
+    if (supervisor.run_base_dirfd != -1 && unlikely(close(supervisor.run_base_dirfd))) {
+        log_errno("Cannot close base control directory");
+    }
+
+    if (supervisor.ctl_sockfd != -1 && unlikely(close(supervisor.ctl_sockfd))) {
+        log_errno("Cannot close control socket");
+    }
+
+    if (supervisor.ctl_connfd != -1 && unlikely(close(supervisor.ctl_connfd))) {
+        log_errno("Cannot close control connection socket");
+    }
+
+    if (supervisor.kqfd != -1 && unlikely(close(supervisor.kqfd))) {
+        log_errno("Cannot close kqueue");
+    }
+}
+
+/*
+#include "hbtree.h"
+static void dtor(const uint64_t k, const void *v)
+{
+    log_info("Destroy %llu: %p", k, v);
+}
+*/
+
 int main(const int argc, const char *const *const argv)
 {
+    /*
+    struct hbtree hb;
+    hbtree_init(&hb, 7);
+    //hbtree_insert(&hb, 2000, NULL);
+    //hbtree_insert(&hb, 4000, NULL);
+    //hbtree_insert(&hb, 4001, NULL);
+    //hbtree_insert(&hb, 4002, NULL);
+    hbtree_insert(&hb, 8000, (void *) 1);
+    hbtree_insert(&hb, 8002, (void *) 2);
+    hbtree_insert(&hb, 8004, (void *) 3);
+    hbtree_insert(&hb, 1002921504606846978, (void *) 7);
+
+    log_info("%p", hbtree_get(&hb, 8000));
+    log_info("%p", hbtree_get(&hb, 8002));
+    log_info("%p", hbtree_get(&hb, 8004));
+    log_info("%p", hbtree_get(&hb, 1002921504606846978));
+    //hbtree_delete(&hb, 8000);
+    //hbtree_delete(&hb, 8002);
+    //hbtree_delete(&hb, 8004);
+
+    hbtree_cleanup(&hb);
+    hbtree_walk(&hb, dtor);
+    hbtree_destroy(&hb, dtor);
+    */
     int exit_status = EXIT_FAILURE;
 
     if (unlikely(argc >= 3)) {
@@ -922,7 +1087,7 @@ int main(const int argc, const char *const *const argv)
     }
 
     struct termios oldt, newt;
-    
+
     if (unlikely(tcgetattr(STDIN_FILENO, &oldt))) {
         perror("tcgetattr");
         goto out_exit;
@@ -938,20 +1103,7 @@ int main(const int argc, const char *const *const argv)
 
     setlinebuf(stdout);
 
-    if (unlikely((supervisor.kqfd = kqueue()) == -1)) {
-        log_errno("Cannot create kqueue");
-        goto out_cleanup;
-    }
-
-    if (unlikely((supervisor.ctlsockfd = create_control_socket()) == -1)) {
-        goto out_cleanup;
-    }
-
-    if (unlikely(arm_filters())) {
-        goto out_cleanup;
-    }
-
-    if (argc == 2 && spawn_sandbox(argv[1])) {
+    if (unlikely(init()) || unlikely(argc == 2 && spawn_sandbox(argv[1]))) {
         goto out_cleanup;
     }
 
@@ -959,22 +1111,7 @@ int main(const int argc, const char *const *const argv)
 
 out_cleanup:
     log_info("Cleanup and shutdown");
-
-    if (unlikely(remove(CONTROL_SOCKET_NAME))) {
-        log_errno("Cannot remove control socket");
-    }
-
-    if (unlikely(supervisor.ctlsockfd != -1 && close(supervisor.ctlsockfd))) {
-        log_errno("Cannot close control socket");
-    }
-
-    if (unlikely(supervisor.ctlconnfd != -1 && close(supervisor.ctlconnfd))) {
-        log_errno("Cannot close control connection socket");
-    }
-
-    if (unlikely(supervisor.kqfd != -1 && close(supervisor.kqfd))) {
-        log_errno("Cannot close kqueue");
-    }
+    deinit();
 
     if (unlikely(tcsetattr(STDIN_FILENO, TCSANOW, &oldt))) {
         log_errno("Cannot restore terminal");

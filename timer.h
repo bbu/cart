@@ -1,6 +1,5 @@
 #pragma once
 
-#include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
 
@@ -18,6 +17,7 @@ typedef cart_cb_t timer_cb_t;
 
 void timer_accept_timeout(size_t);
 timer_cb_t timer_get_cb(size_t);
+void timer_delete_all(void);
 
 timer_t timer_new(void);
 timer_t timer_add(timer_cb_t, timer_repeat_t, bool, timer_interval_t, timer_unit_t, bool);
